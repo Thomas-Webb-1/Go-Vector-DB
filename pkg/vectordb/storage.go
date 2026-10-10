@@ -1,7 +1,8 @@
-﻿package vectordb
+package vectordb
 
 import (
 	"errors"
+	"runtime"
 	"sort"
 	"sync"
 )
@@ -182,20 +183,67 @@ func (db *InMemoryVectorDB) Query(target []float32, metric MetricType, k int) ([
 		return []QueryResult{}, nil
 	}
 
+	// collect active slots without alloc overhead
 	entries := make([]activeEntry, 0, n)
 	for h, s := range db.index {
 		entries = append(entries, activeEntry{slot: s, hash: h})
 	}
 
-	results, err := db.evalEntries(entries, target, distFunc)
-	if err != nil {
-		return nil, err
+	numWorkers := runtime.GOMAXPROCS(0)
+	var results []QueryResult
+
+	// small collection or single core: sequential scan over flat arena
+	if n < 64 || numWorkers <= 1 {
+		var err error
+		results, err = db.evalEntries(entries, target, distFunc)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// parallel scan across chunks of contiguous memory
+		chunkSize := (n + numWorkers - 1) / numWorkers
+		workerResults := make([][]QueryResult, numWorkers)
+		var wg sync.WaitGroup
+		var errOnce sync.Once
+		var firstErr error
+
+		for w := 0; w < numWorkers; w++ {
+			start := w * chunkSize
+			end := start + chunkSize
+			if start >= n {
+				break
+			}
+			if end > n {
+				end = n
+			}
+
+			wg.Add(1)
+			go func(wIdx, s, e int) {
+				defer wg.Done()
+				sub, err := db.evalEntries(entries[s:e], target, distFunc)
+				if err != nil {
+					errOnce.Do(func() { firstErr = err })
+					return
+				}
+				workerResults[wIdx] = sub
+			}(w, start, end)
+		}
+		wg.Wait()
+
+		if firstErr != nil {
+			return nil, firstErr
+		}
+
+		results = make([]QueryResult, 0, n)
+		for _, wr := range workerResults {
+			results = append(results, wr...)
+		}
 	}
 
 	sortQueryResults(results, metric)
-
 	if k > len(results) {
 		k = len(results)
 	}
+
 	return results[:k], nil
 }
