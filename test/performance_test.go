@@ -1,9 +1,11 @@
 ﻿package test
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"testing"
+	"time"
 
 	. "vectordb/pkg/vectordb"
 )
@@ -68,5 +70,61 @@ func BenchmarkDatabase_Query(b *testing.B) {
 				_, _ = db.Query(target, MetricEuclideanDistance, 10)
 			}
 		})
+	}
+}
+
+func BenchmarkBinaryCodec(b *testing.B) {
+	dim := 1536
+	req := &Request{
+		Type: MsgQuery,
+		Query: &QueryPayload{
+			Vector: randVec(dim),
+			Metric: MetricCosineSimilarity,
+			TopK:   10,
+		},
+	}
+
+	codec := NewBinaryCodec()
+	b.Run("Encode", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = codec.EncodeRequest(req)
+		}
+	})
+
+	binBytes, _ := codec.EncodeRequest(req)
+
+	b.Run("Decode", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = codec.DecodeRequest(binBytes)
+		}
+	})
+}
+
+func BenchmarkParallelClient_Query(b *testing.B) {
+	dim := 128
+	db := NewInMemoryVectorDB(dim)
+	for i := 0; i < 300; i++ {
+		_ = db.Add(fmt.Sprintf("%d", i), randVec(dim))
+	}
+	srv := NewServer("127.0.0.1:0", db, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+
+	for srv.Addr() == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	client := NewParallelClient(srv.Addr().String(), nil)
+	_ = client.Connect()
+	defer client.Close()
+
+	target := randVec(dim)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = client.Query(target, MetricCosineSimilarity, 5)
 	}
 }
