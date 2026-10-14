@@ -1,4 +1,4 @@
-﻿package test
+package test
 
 import (
 	"context"
@@ -126,5 +126,32 @@ func BenchmarkParallelClient_Query(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_, _ = client.Query(target, MetricCosineSimilarity, 5)
+	}
+}
+
+func BenchmarkDistributedClient_Query(b *testing.B) {
+	dim := 128
+	numServers := 3
+	servers, _, addrs, cancel := setupTestCluster(&testing.T{}, numServers, dim)
+	defer func() {
+		cancel()
+		for _, s := range servers {
+			_ = s.Stop()
+		}
+	}()
+
+	distClient, _ := NewDistributedClient(addrs, nil)
+	_ = distClient.Connect()
+	defer distClient.Close()
+
+	for i := 0; i < 300; i++ {
+		_ = distClient.Add(fmt.Sprintf("%d", i), randVec(dim))
+	}
+
+	target := randVec(dim)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = distClient.Query(target, MetricCosineSimilarity, 5)
 	}
 }
